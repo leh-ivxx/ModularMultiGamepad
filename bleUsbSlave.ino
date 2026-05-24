@@ -1,16 +1,19 @@
 #include <Arduino.h>
 #include <WiFi.h>
+
 #include <esp_now.h>
 #include <Preferences.h>
 #include <BleGamepad.h>
+
 
 #define D0 21
 #define D1 14
 #define D2 19
 #define D3 18
 
-#define A0 36
-#define A1 39
+#define A0 39
+#define A1 36
+
 
 #define ANALOG_RES 4095
 
@@ -35,9 +38,9 @@ Mode deviceMode;
 // DEVICE NAME
 //------------------------------------------------
 
-char deviceName[32] = "ESP32_BASE";
+char deviceName[32] = "GP3-RS1";
 
-BleGamepad bleGamepad(deviceName,"ESP32",100);
+BleGamepad bleGamepad(deviceName,"LEHIVXX",100);
 
 //------------------------------------------------
 // MASTER MAC
@@ -355,10 +358,11 @@ void detectMode()
     deviceMode=MODE_BLE_ONLY;
 
   else if(!b1 && b2)
-    deviceMode=MODE_HYBRID;
-
-  else
+      
     deviceMode=MODE_ESPNOW_ONLY;
+    
+  else
+  deviceMode=MODE_HYBRID;
 }
 
 //------------------------------------------------
