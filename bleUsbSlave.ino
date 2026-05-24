@@ -14,6 +14,10 @@
 
 #define ANALOG_RES 4095
 
+// Encoder pins for left stick X axis
+#define ENC_A A0
+#define ENC_B 27
+
 //------------------------------------------------
 // MODES
 //------------------------------------------------
@@ -54,6 +58,15 @@ uint16_t analogInputs[2];
 
 uint32_t buttons=0;
 int16_t axis[8];
+
+//------------------------------------------------
+// ENCODER STATE (LEFT STICK X)
+//------------------------------------------------
+
+int joystickX = 0;
+int joystickX1 = 0;
+int lastA = 0;
+const int STEP = 1365;
 
 //------------------------------------------------
 // INPUT MAP
@@ -194,7 +207,28 @@ void readInputs()
   digitalInputs[2]=!digitalRead(D2);
   digitalInputs[3]=!digitalRead(D3);
 
-  analogInputs[0]=analogRead(A0);
+  // Read encoder for left stick X
+  int currentA = digitalRead(ENC_A);
+
+  // detect edge
+  if (currentA != lastA)
+  {
+    // determine direction
+    if (digitalRead(ENC_B) != currentA)
+    {
+      joystickX += STEP;
+    }
+    else
+    {
+      joystickX -= STEP;
+    }
+
+    joystickX1 = constrain(joystickX, -32767, 32767);
+  }
+
+  lastA = currentA;
+
+  // Still read A1 as analog
   analogInputs[1]=analogRead(A1);
 }
 
@@ -228,6 +262,9 @@ void applyMapping()
   buttons=0;
   memset(axis,0,sizeof(axis));
 
+  // Set left stick X from encoder
+  axis[0] = joystickX1;
+
   for(int i=0;i<MAX_MAP;i++)
   {
     InputMap &m=mapTable[i];
@@ -240,9 +277,13 @@ void applyMapping()
         buttons|=(1<<m.target);
     }
 
+    // Skip analog processing for axis 0 (reserved for encoder)
     if(m.type==1)
     {
-      axis[m.target]=processAnalog(m.source,analogInputs[m.source]);
+      if(m.target != 0)
+      {
+        axis[m.target]=processAnalog(m.source,analogInputs[m.source]);
+      }
     }
   }
 }
@@ -490,6 +531,12 @@ void setup()
   pinMode(D1,INPUT_PULLUP);
   pinMode(D2,INPUT_PULLUP);
   pinMode(D3,INPUT_PULLUP);
+
+  // Encoder pins
+  pinMode(ENC_A, INPUT_PULLUP);
+  pinMode(ENC_B, INPUT_PULLUP);
+
+  lastA = digitalRead(ENC_A);
 
   analogReadResolution(12);
 
