@@ -15,8 +15,8 @@
 #define ANALOG_RES 4095
 
 // Encoder pins for left stick X axis
-#define ENC_A A0
-#define ENC_B 27
+#define ENC_A 4
+#define ENC_B 5
 
 //------------------------------------------------
 // MODES
