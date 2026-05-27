@@ -9,19 +9,30 @@
 #include <BleGamepad.h>
 
 //================================================
-// MASTER BUTTON PINS
+// MASTER 4x3 KEYPAD PINS (12 BUTTONS)
 //================================================
 
-#define BTN1 4
-#define BTN2 5
-#define BTN3 6
-#define BTN4 7
+#define BTN_ROW1_COL1 4
+#define BTN_ROW1_COL2 5
+#define BTN_ROW1_COL3 6
+
+#define BTN_ROW2_COL1 7
+#define BTN_ROW2_COL2 8
+#define BTN_ROW2_COL3 9
+
+#define BTN_ROW3_COL1 10
+#define BTN_ROW3_COL2 11
+#define BTN_ROW3_COL3 12
+
+#define BTN_ROW4_COL1 13
+#define BTN_ROW4_COL2 14
+#define BTN_ROW4_COL3 15
 
 //================================================
 // SYSTEM LIMITS
 //================================================
 
-#define MAX_BUTTONS 16
+#define MAX_BUTTONS 30    // 12 master + 6 per slave * 3 = 30 total
 #define MAX_AXES 8
 #define MAX_SLAVES 3
 
@@ -153,19 +164,37 @@ void initESPNow()
 }
 
 //================================================
-// READ MASTER BUTTONS
+// READ MASTER BUTTONS - 4x3 KEYPAD (12 BUTTONS)
 //================================================
 
 void readLocalButtons()
 {
-  if(!digitalRead(BTN1)) buttons |= (1<<0);
-  if(!digitalRead(BTN2)) buttons |= (1<<1);
-  if(!digitalRead(BTN3)) buttons |= (1<<2);
-  if(!digitalRead(BTN4)) buttons |= (1<<3);
+  // Row 1
+  if(!digitalRead(BTN_ROW1_COL1)) buttons |= (1<<0);
+  if(!digitalRead(BTN_ROW1_COL2)) buttons |= (1<<1);
+  if(!digitalRead(BTN_ROW1_COL3)) buttons |= (1<<2);
+
+  // Row 2
+  if(!digitalRead(BTN_ROW2_COL1)) buttons |= (1<<3);
+  if(!digitalRead(BTN_ROW2_COL2)) buttons |= (1<<4);
+  if(!digitalRead(BTN_ROW2_COL3)) buttons |= (1<<5);
+
+  // Row 3
+  if(!digitalRead(BTN_ROW3_COL1)) buttons |= (1<<6);
+  if(!digitalRead(BTN_ROW3_COL2)) buttons |= (1<<7);
+  if(!digitalRead(BTN_ROW3_COL3)) buttons |= (1<<8);
+
+  // Row 4
+  if(!digitalRead(BTN_ROW4_COL1)) buttons |= (1<<9);
+  if(!digitalRead(BTN_ROW4_COL2)) buttons |= (1<<10);
+  if(!digitalRead(BTN_ROW4_COL3)) buttons |= (1<<11);
 }
 
 //================================================
 // MERGE SLAVE INPUTS
+// Slave 1 buttons: 12-17 (6 buttons)
+// Slave 2 buttons: 18-23 (6 buttons)
+// Slave 3 buttons: 24-29 (6 buttons)
 //================================================
 
 void mergeSlaveInputs()
@@ -177,8 +206,11 @@ void mergeSlaveInputs()
     if(millis() - slaves[i].lastSeen > 1000)
       continue;
 
-    buttons |= slaves[i].data.buttons;
+    // Offset slave buttons by 12 + (slave_id * 6)
+    uint32_t slaveButtons = slaves[i].data.buttons << (12 + (i * 6));
+    buttons |= slaveButtons;
 
+    // Merge axes
     for(int a=0;a<MAX_AXES;a++)
     {
       if(slaves[i].data.axis[a] != 0)
@@ -224,7 +256,7 @@ void updateBLE()
 
   for(int i=0;i<MAX_BUTTONS;i++)
   {
-    if(buttons & (1<<i))
+    if(buttons & (1UL<<i))
       bleGamepad.press(i+1);
     else
       bleGamepad.release(i+1);
@@ -243,13 +275,13 @@ void updateBLE()
 }
 
 //================================================
-// DETECT MODE
+// DETECT MODE - HOLD BTN1 FOR USB, BTN2 FOR BLE
 //================================================
 
 void detectMode()
 {
-  bool b1 = !digitalRead(BTN1);
-  bool b2 = !digitalRead(BTN2);
+  bool b1 = !digitalRead(BTN_ROW1_COL1);
+  bool b2 = !digitalRead(BTN_ROW1_COL2);
 
   if(b1)
     mode = MODE_USB;
@@ -269,10 +301,22 @@ void setup()
 {
   Serial.begin(115200);
 
-  pinMode(BTN1,INPUT_PULLUP);
-  pinMode(BTN2,INPUT_PULLUP);
-  pinMode(BTN3,INPUT_PULLUP);
-  pinMode(BTN4,INPUT_PULLUP);
+  // Configure all 12 button pins
+  pinMode(BTN_ROW1_COL1, INPUT_PULLUP);
+  pinMode(BTN_ROW1_COL2, INPUT_PULLUP);
+  pinMode(BTN_ROW1_COL3, INPUT_PULLUP);
+  
+  pinMode(BTN_ROW2_COL1, INPUT_PULLUP);
+  pinMode(BTN_ROW2_COL2, INPUT_PULLUP);
+  pinMode(BTN_ROW2_COL3, INPUT_PULLUP);
+  
+  pinMode(BTN_ROW3_COL1, INPUT_PULLUP);
+  pinMode(BTN_ROW3_COL2, INPUT_PULLUP);
+  pinMode(BTN_ROW3_COL3, INPUT_PULLUP);
+  
+  pinMode(BTN_ROW4_COL1, INPUT_PULLUP);
+  pinMode(BTN_ROW4_COL2, INPUT_PULLUP);
+  pinMode(BTN_ROW4_COL3, INPUT_PULLUP);
 
   detectMode();
 
