@@ -21,7 +21,8 @@ Adafruit_NeoPixel rgb_led = Adafruit_NeoPixel(NUM_RGB_LEDS, RGB_LED_PIN, NEO_GRB
 //================================================
 // KEYPAD CONFIGURATION (4x3 MATRIX)
 //================================================
-
+#define B1 1
+#define B2 2
 #define ROWS 4
 #define COLS 3
 
@@ -87,7 +88,7 @@ int16_t axis[MAX_AXES];
 //================================================
 
 USBHIDGamepad usbGamepad;
-BleGamepad bleGamepad("ESP32_Modular_Gamepad", "ESP32", 100);
+BleGamepad bleGamepad("EGP-01", "LEHIVXX", 31);
 
 //================================================
 // SLAVE PACKET FORMAT
@@ -425,8 +426,8 @@ void detectMode()
 {
   delay(100);  // Debounce delay
   
-  bool b1 = !digitalRead(R1);  // Button 0 (Row1, Col1)
-  bool b2 = !digitalRead(R2);  // Button 1 (Row1, Col2)
+  bool b1 = !digitalRead(B1);  // Button 0 (Row1, Col1)
+  bool b2 = !digitalRead(B2);  // Button 1 (Row1, Col2)
 
   if (b1) {
     mode = MODE_BLE_ONLY;
@@ -453,7 +454,8 @@ void setup()
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\nESP32 Modular Gamepad Starting...");
-
+pinMode(B1,INPUT_PULLUP);
+  pinMode(B2,INPUT_PULLUP);
   // Initialize RGB LED
   rgb_led.begin();
   setLEDColor(255, 255, 0);  // Yellow startup
