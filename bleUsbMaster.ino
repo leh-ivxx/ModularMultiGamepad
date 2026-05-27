@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
+#include <Keypad.h>
+#include <Adafruit_NeoPixel.h>
 
 #include "USB.h"
 #include "USBHID.h"
@@ -9,24 +11,39 @@
 #include <BleGamepad.h>
 
 //================================================
-// MASTER 4x3 KEYPAD PINS (12 BUTTONS)
+// NEOPIXEL RGB LED CONFIG
 //================================================
 
-#define BTN_ROW1_COL1 4
-#define BTN_ROW1_COL2 5
-#define BTN_ROW1_COL3 6
+#define RGB_LED_PIN 48
+#define NUM_RGB_LEDS 1
+Adafruit_NeoPixel rgb_led = Adafruit_NeoPixel(NUM_RGB_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-#define BTN_ROW2_COL1 7
-#define BTN_ROW2_COL2 8
-#define BTN_ROW2_COL3 9
+//================================================
+// KEYPAD CONFIGURATION (4x3 MATRIX)
+//================================================
 
-#define BTN_ROW3_COL1 10
-#define BTN_ROW3_COL2 11
-#define BTN_ROW3_COL3 12
+#define ROWS 4
+#define COLS 3
 
-#define BTN_ROW4_COL1 13
-#define BTN_ROW4_COL2 14
-#define BTN_ROW4_COL3 15
+#define C1 15
+#define C2 16
+#define C3 17
+#define R1 4
+#define R2 5
+#define R3 6
+#define R4 7
+
+byte rowPins[ROWS] = {R1, R2, R3, R4};
+byte colPins[COLS] = {C1, C2, C3};
+
+char hexaKeys[ROWS][COLS] = {
+  {'0', '1', '2'},
+  {'3', '4', '5'},
+  {'6', '7', '8'},
+  {'9', 'A', 'B'}
+};
+
+Keypad keypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
 
 //================================================
 // SYSTEM LIMITS
@@ -37,16 +54,26 @@
 #define MAX_SLAVES 3
 
 //================================================
-// DEVICE MODE
+// DEVICE MODES
 //================================================
 
 enum DeviceMode
 {
-  MODE_USB,
-  MODE_BLE
+  MODE_USB_ONLY,
+  MODE_BLE_ONLY,
+  MODE_USB_BLE_DUAL
 };
 
 DeviceMode mode;
+
+//================================================
+// RGB LED EFFECT TIMING
+//================================================
+
+unsigned long lastLEDUpdate = 0;
+unsigned long lastModeChangeTime = 0;
+bool modeChangeActive = false;
+uint8_t modeChangeCounter = 0;
 
 //================================================
 // GAMEPAD STATE
@@ -60,7 +87,7 @@ int16_t axis[MAX_AXES];
 //================================================
 
 USBHIDGamepad usbGamepad;
-BleGamepad bleGamepad("ESP32_Modular_Gamepad","ESP32",100);
+BleGamepad bleGamepad("ESP32_Modular_Gamepad", "ESP32", 100);
 
 //================================================
 // SLAVE PACKET FORMAT
@@ -89,29 +116,148 @@ struct SlaveDevice
 SlaveDevice slaves[MAX_SLAVES];
 
 //================================================
+// RGB LED EFFECTS - POWER EFFICIENT
+//================================================
+
+void setLEDColor(uint8_t r, uint8_t g, uint8_t b)
+{
+  rgb_led.setPixelColor(0, rgb_led.Color(r, g, b));
+  rgb_led.show();
+}
+
+void blinkEffect(uint8_t r, uint8_t g, uint8_t b, uint8_t count, uint16_t duration)
+{
+  for (uint8_t i = 0; i < count; i++) {
+    setLEDColor(r, g, b);
+    delay(duration / 2);
+    setLEDColor(0, 0, 0);
+    delay(duration / 2);
+  }
+}
+
+void statusBlinkBySlaves(uint8_t numSlaves)
+{
+  // Blink pattern based on number of connected slaves
+  // 1 slave: 1 blink red
+  // 2 slaves: 2 blinks orange
+  // 3 slaves: 3 blinks yellow
+  
+  uint8_t r = 255, g = 0, b = 0;
+  
+  if (numSlaves >= 2) {
+    r = 255;
+    g = 165;
+    b = 0;  // Orange
+  }
+  if (numSlaves >= 3) {
+    r = 255;
+    g = 255;
+    b = 0;  // Yellow
+  }
+  
+  blinkEffect(r, g, b, numSlaves, 300);
+}
+
+// Breathing effect - smooth and efficient
+void breathingEffect(uint8_t r, uint8_t g, uint8_t b, uint16_t duration)
+{
+  static unsigned long breathStart = 0;
+  unsigned long elapsed = millis() - breathStart;
+  
+  if (elapsed > duration) {
+    breathStart = millis();
+    elapsed = 0;
+  }
+  
+  // Sine wave brightness 0-255
+  float progress = (float)elapsed / duration;
+  uint8_t brightness = (sin(progress * 2 * PI) + 1) * 127.5;
+  
+  rgb_led.setPixelColor(0, rgb_led.Color(
+    (r * brightness) / 255,
+    (g * brightness) / 255,
+    (b * brightness) / 255
+  ));
+  rgb_led.show();
+}
+
+//================================================
+// UPDATE LED STATUS
+//================================================
+
+void updateLEDStatus()
+{
+  unsigned long now = millis();
+  
+  // Mode change animation (first 3 seconds)
+  if (modeChangeActive && (now - lastModeChangeTime < 3000)) {
+    if (mode == MODE_BLE_ONLY) {
+      blinkEffect(0, 0, 255, 1, 500);  // Blue for BLE
+    } else if (mode == MODE_USB_ONLY) {
+      blinkEffect(0, 255, 0, 1, 500);  // Green for USB
+    } else {
+      blinkEffect(255, 0, 255, 1, 500);  // Magenta for DUAL
+    }
+    modeChangeCounter++;
+    if (modeChangeCounter >= 3) {
+      modeChangeActive = false;
+    }
+  }
+  
+  // Normal operation: breathing effect showing connected slaves
+  if (!modeChangeActive) {
+    uint8_t activeSlaves = 0;
+    for (int i = 0; i < MAX_SLAVES; i++) {
+      if (slaves[i].active && (now - slaves[i].lastSeen < 1000)) {
+        activeSlaves++;
+      }
+    }
+    
+    if (mode == MODE_BLE_ONLY) {
+      if (bleGamepad.isConnected()) {
+        breathingEffect(0, 0, 255, 2000);  // Breathing blue for BLE connected
+      } else {
+        // Pulsing without breathing (off)
+        if ((now / 500) % 2 == 0) {
+          setLEDColor(0, 0, 100);  // Dim blue when not connected
+        } else {
+          setLEDColor(0, 0, 0);
+        }
+      }
+    } else if (mode == MODE_USB_ONLY) {
+      breathingEffect(0, 255, 0, 2000);  // Breathing green for USB
+    } else {
+      // DUAL mode - breathing magenta
+      breathingEffect(255, 0, 255, 2000);
+    }
+    
+    // Occasional slave status indication
+    if (activeSlaves > 0 && (now / 5000) % 4 == 0) {
+      statusBlinkBySlaves(activeSlaves);
+    }
+  }
+}
+
+//================================================
 // FIND / REGISTER SLAVE
 //================================================
 
 int findSlave(uint8_t *mac)
 {
-  for(int i=0;i<MAX_SLAVES;i++)
-  {
-    if(memcmp(slaves[i].mac,mac,6)==0)
+  for (int i = 0; i < MAX_SLAVES; i++) {
+    if (memcmp(slaves[i].mac, mac, 6) == 0)
       return i;
   }
 
-  for(int i=0;i<MAX_SLAVES;i++)
-  {
-    if(!slaves[i].active)
-    {
-      memcpy(slaves[i].mac,mac,6);
-      slaves[i].active=true;
+  for (int i = 0; i < MAX_SLAVES; i++) {
+    if (!slaves[i].active) {
+      memcpy(slaves[i].mac, mac, 6);
+      slaves[i].active = true;
 
       Serial.print("New slave registered: ");
 
-      for(int b=0;b<6;b++)
-      {
-        Serial.print(mac[b],HEX);
+      for (int b = 0; b < 6; b++) {
+        Serial.print(mac[b], HEX);
         Serial.print(":");
       }
 
@@ -128,17 +274,17 @@ int findSlave(uint8_t *mac)
 // ESP-NOW RECEIVE
 //================================================
 
-void onReceive(const uint8_t *mac,const uint8_t *data,int len)
+void onReceive(const uint8_t *mac, const uint8_t *data, int len)
 {
-  if(len != sizeof(GamepadPacket)) return;
+  if (len != sizeof(GamepadPacket)) return;
 
   GamepadPacket packet;
 
-  memcpy(&packet,data,sizeof(packet));
+  memcpy(&packet, data, sizeof(packet));
 
   int id = findSlave((uint8_t*)mac);
 
-  if(id < 0) return;
+  if (id < 0) return;
 
   slaves[id].data = packet;
   slaves[id].lastSeen = millis();
@@ -152,8 +298,7 @@ void initESPNow()
 {
   WiFi.mode(WIFI_STA);
 
-  if(esp_now_init() != ESP_OK)
-  {
+  if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW INIT FAILED");
     return;
   }
@@ -164,30 +309,26 @@ void initESPNow()
 }
 
 //================================================
-// READ MASTER BUTTONS - 4x3 KEYPAD (12 BUTTONS)
+// READ MASTER BUTTONS - 4x3 KEYPAD
 //================================================
 
 void readLocalButtons()
 {
-  // Row 1
-  if(!digitalRead(BTN_ROW1_COL1)) buttons |= (1<<0);
-  if(!digitalRead(BTN_ROW1_COL2)) buttons |= (1<<1);
-  if(!digitalRead(BTN_ROW1_COL3)) buttons |= (1<<2);
-
-  // Row 2
-  if(!digitalRead(BTN_ROW2_COL1)) buttons |= (1<<3);
-  if(!digitalRead(BTN_ROW2_COL2)) buttons |= (1<<4);
-  if(!digitalRead(BTN_ROW2_COL3)) buttons |= (1<<5);
-
-  // Row 3
-  if(!digitalRead(BTN_ROW3_COL1)) buttons |= (1<<6);
-  if(!digitalRead(BTN_ROW3_COL2)) buttons |= (1<<7);
-  if(!digitalRead(BTN_ROW3_COL3)) buttons |= (1<<8);
-
-  // Row 4
-  if(!digitalRead(BTN_ROW4_COL1)) buttons |= (1<<9);
-  if(!digitalRead(BTN_ROW4_COL2)) buttons |= (1<<10);
-  if(!digitalRead(BTN_ROW4_COL3)) buttons |= (1<<11);
+  if (keypad.getKeys()) {
+    for (int i = 0; i < LIST_MAX; i++) {
+      if (keypad.key[i].stateChanged) {
+        int buttonIndex = keypad.key[i].kchar - '0';
+        
+        if (buttonIndex >= 0 && buttonIndex < 12) {
+          if (keypad.key[i].state == PRESSED) {
+            buttons |= (1UL << buttonIndex);
+          } else if (keypad.key[i].state == RELEASED) {
+            buttons &= ~(1UL << buttonIndex);
+          }
+        }
+      }
+    }
+  }
 }
 
 //================================================
@@ -199,11 +340,12 @@ void readLocalButtons()
 
 void mergeSlaveInputs()
 {
-  for(int i=0;i<MAX_SLAVES;i++)
-  {
-    if(!slaves[i].active) continue;
+  unsigned long now = millis();
+  
+  for (int i = 0; i < MAX_SLAVES; i++) {
+    if (!slaves[i].active) continue;
 
-    if(millis() - slaves[i].lastSeen > 1000)
+    if (now - slaves[i].lastSeen > 1000)
       continue;
 
     // Offset slave buttons by 12 + (slave_id * 6)
@@ -211,9 +353,8 @@ void mergeSlaveInputs()
     buttons |= slaveButtons;
 
     // Merge axes
-    for(int a=0;a<MAX_AXES;a++)
-    {
-      if(slaves[i].data.axis[a] != 0)
+    for (int a = 0; a < MAX_AXES; a++) {
+      if (slaves[i].data.axis[a] != 0)
         axis[a] = slaves[i].data.axis[a];
     }
   }
@@ -252,14 +393,13 @@ void updateUSB()
 
 void updateBLE()
 {
-  if(!bleGamepad.isConnected()) return;
+  if (!bleGamepad.isConnected()) return;
 
-  for(int i=0;i<MAX_BUTTONS;i++)
-  {
-    if(buttons & (1UL<<i))
-      bleGamepad.press(i+1);
+  for (int i = 0; i < MAX_BUTTONS; i++) {
+    if (buttons & (1UL << i))
+      bleGamepad.press(i + 1);
     else
-      bleGamepad.release(i+1);
+      bleGamepad.release(i + 1);
   }
 
   bleGamepad.setAxes(
@@ -275,22 +415,33 @@ void updateBLE()
 }
 
 //================================================
-// DETECT MODE - HOLD BTN1 FOR USB, BTN2 FOR BLE
+// DETECT MODE - STARTUP BUTTON DETECTION
+// B1 (0) pressed = BLE MODE
+// B2 (1) pressed = USB + BLE DUAL MODE
+// None pressed = USB MODE (default)
 //================================================
 
 void detectMode()
 {
-  bool b1 = !digitalRead(BTN_ROW1_COL1);
-  bool b2 = !digitalRead(BTN_ROW1_COL2);
+  delay(100);  // Debounce delay
+  
+  bool b1 = !digitalRead(R1);  // Button 0 (Row1, Col1)
+  bool b2 = !digitalRead(R2);  // Button 1 (Row1, Col2)
 
-  if(b1)
-    mode = MODE_USB;
-
-  else if(b2)
-    mode = MODE_BLE;
-
-  else
-    mode = MODE_USB;
+  if (b1) {
+    mode = MODE_BLE_ONLY;
+    Serial.println("BLE MODE SELECTED");
+  } else if (b2) {
+    mode = MODE_USB_BLE_DUAL;
+    Serial.println("DUAL MODE SELECTED");
+  } else {
+    mode = MODE_USB_ONLY;
+    Serial.println("USB MODE SELECTED");
+  }
+  
+  modeChangeActive = true;
+  lastModeChangeTime = millis();
+  modeChangeCounter = 0;
 }
 
 //================================================
@@ -300,60 +451,64 @@ void detectMode()
 void setup()
 {
   Serial.begin(115200);
+  delay(500);
+  Serial.println("\n\nESP32 Modular Gamepad Starting...");
 
-  // Configure all 12 button pins
-  pinMode(BTN_ROW1_COL1, INPUT_PULLUP);
-  pinMode(BTN_ROW1_COL2, INPUT_PULLUP);
-  pinMode(BTN_ROW1_COL3, INPUT_PULLUP);
-  
-  pinMode(BTN_ROW2_COL1, INPUT_PULLUP);
-  pinMode(BTN_ROW2_COL2, INPUT_PULLUP);
-  pinMode(BTN_ROW2_COL3, INPUT_PULLUP);
-  
-  pinMode(BTN_ROW3_COL1, INPUT_PULLUP);
-  pinMode(BTN_ROW3_COL2, INPUT_PULLUP);
-  pinMode(BTN_ROW3_COL3, INPUT_PULLUP);
-  
-  pinMode(BTN_ROW4_COL1, INPUT_PULLUP);
-  pinMode(BTN_ROW4_COL2, INPUT_PULLUP);
-  pinMode(BTN_ROW4_COL3, INPUT_PULLUP);
+  // Initialize RGB LED
+  rgb_led.begin();
+  setLEDColor(255, 255, 0);  // Yellow startup
+  delay(500);
+  setLEDColor(0, 0, 0);
 
+  // Keypad initialized via library
+  Serial.println("Keypad initialized");
+
+  // Detect operating mode before ESP-NOW init
   detectMode();
 
+  // Initialize ESP-NOW for slave communication
   initESPNow();
 
-  if(mode == MODE_USB)
-  {
-    Serial.println("USB MODE");
-
+  // Initialize USB or BLE based on mode
+  if (mode == MODE_USB_ONLY || mode == MODE_USB_BLE_DUAL) {
+    Serial.println("USB GAMEPAD ENABLED");
     USB.begin();
     usbGamepad.begin();
   }
-  else
-  {
-    Serial.println("BLE MODE");
 
+  if (mode == MODE_BLE_ONLY || mode == MODE_USB_BLE_DUAL) {
+    Serial.println("BLE GAMEPAD ENABLED");
     bleGamepad.begin();
   }
+
+  Serial.println("Setup complete. Ready for input.");
 }
 
 //================================================
-// LOOP
+// MAIN LOOP
 //================================================
 
 void loop()
 {
   buttons = 0;
-  memset(axis,0,sizeof(axis));
+  memset(axis, 0, sizeof(axis));
 
   readLocalButtons();
-
   mergeSlaveInputs();
 
-  if(mode == MODE_USB)
+  // Update gamepad outputs based on mode
+  if (mode == MODE_USB_ONLY) {
     updateUSB();
-  else
+  } else if (mode == MODE_BLE_ONLY) {
     updateBLE();
+  } else {
+    // DUAL MODE
+    updateUSB();
+    updateBLE();
+  }
+
+  // Update LED status (non-blocking)
+  updateLEDStatus();
 
   delay(5);
 }
