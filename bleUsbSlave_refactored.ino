@@ -5,13 +5,15 @@
 #include <BleGamepad.h>
 
 //================================================
-// PIN DEFINITIONS
+// PIN DEFINITIONS (6 BUTTONS + 2 ANALOG + ENCODER)
 //================================================
 
 #define D0 21
 #define D1 14
 #define D2 19
 #define D3 18
+#define D4 17
+#define D5 16
 #define A0 39
 #define A1 36
 #define ENC_A 4
@@ -25,9 +27,10 @@
 #define ANALOG_CENTER 2048
 #define AXIS_MIN -32767
 #define AXIS_MAX 32767
-#define MAX_MAP 6
+#define MAX_MAP 8
 #define MAX_AXES 8
 #define MAX_BUTTONS 32
+#define MAX_DIGITAL_INPUTS 6
 #define ESP_NOW_SEND_INTERVAL 5  // milliseconds
 #define DEVICE_NAME_SIZE 32
 #define MAC_ADDRESS_SIZE 6
@@ -100,7 +103,7 @@ BleGamepad bleGamepad(deviceName, "LEHIVXX", 100);
 
 uint8_t masterAddress[MAC_ADDRESS_SIZE] = {0xCC, 0x8D, 0xA2, 0xEC, 0xDC, 0xAC};
 
-bool digitalInputs[4];
+bool digitalInputs[6];
 uint16_t analogInputs[2];
 uint32_t buttons = 0;
 int16_t axis[MAX_AXES];
@@ -133,12 +136,16 @@ unsigned long lastESPNowSend = 0;
 //================================================
 
 void setDefaultMapping() {
+  // Map 6 digital inputs (D0-D5) to buttons 0-5
   mapTable[0] = {0, 0, 0, true};
   mapTable[1] = {0, 1, 1, true};
   mapTable[2] = {0, 2, 2, true};
   mapTable[3] = {0, 3, 3, true};
-  mapTable[4] = {1, 0, 0, true};
-  mapTable[5] = {1, 1, 1, true};
+  mapTable[4] = {0, 4, 4, true};
+  mapTable[5] = {0, 5, 5, true};
+  // Map 2 analog inputs (A0-A1) to axes 0-1
+  mapTable[6] = {1, 0, 0, true};
+  mapTable[7] = {1, 1, 1, true};
 }
 
 void setDefaultAnalogConfig() {
@@ -206,11 +213,13 @@ void resetConfig() {
 //================================================
 
 void readInputs() {
-  // Read digital inputs
+  // Read digital inputs (6 buttons)
   digitalInputs[0] = !digitalRead(D0);
   digitalInputs[1] = !digitalRead(D1);
   digitalInputs[2] = !digitalRead(D2);
   digitalInputs[3] = !digitalRead(D3);
+  digitalInputs[4] = !digitalRead(D4);
+  digitalInputs[5] = !digitalRead(D5);
 
   // Read encoder
   int currentA = digitalRead(ENC_A);
@@ -275,9 +284,9 @@ void applyMapping() {
 
     if (!m.enabled) continue;
 
-    // Digital input mapping
+    // Digital input mapping (6 digital inputs D0-D5)
     if (m.type == 0) {
-      if (m.source < 4 && digitalInputs[m.source]) {
+      if (m.source < MAX_DIGITAL_INPUTS && digitalInputs[m.source]) {
         if (m.target < MAX_BUTTONS) {
           buttons |= (1UL << m.target);
         }
@@ -421,8 +430,8 @@ void cmdMapDigital(const String& cmd) {
   target.toUpperCase();
 
   int src = input.substring(1).toInt();
-  if (src < 0 || src >= 4) {
-    Serial.println("INVALID DIGITAL SOURCE (D0-D3)");
+  if (src < 0 || src >= MAX_DIGITAL_INPUTS) {
+    Serial.println("INVALID DIGITAL SOURCE (D0-D5)");
     return;
   }
 
@@ -466,7 +475,7 @@ void cmdMapAnalog(const String& cmd) {
     return;
   }
 
-  int mapIndex = 4 + src;
+  int mapIndex = 6 + src;
   mapTable[mapIndex].type = 1;
   mapTable[mapIndex].source = src;
   mapTable[mapIndex].target = axisIndex;
@@ -481,7 +490,7 @@ void cmdDisableInput(const String& cmd) {
 
   if (input[0] == 'D') {
     int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < 4) {
+    if (idx >= 0 && idx < MAX_DIGITAL_INPUTS) {
       mapTable[idx].enabled = false;
       Serial.println("INPUT DISABLED");
       return;
@@ -489,7 +498,7 @@ void cmdDisableInput(const String& cmd) {
   } else if (input[0] == 'A') {
     int idx = input.substring(1).toInt();
     if (idx >= 0 && idx < 2) {
-      mapTable[4 + idx].enabled = false;
+      mapTable[6 + idx].enabled = false;
       Serial.println("INPUT DISABLED");
       return;
     }
@@ -503,7 +512,7 @@ void cmdEnableInput(const String& cmd) {
 
   if (input[0] == 'D') {
     int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < 4) {
+    if (idx >= 0 && idx < MAX_DIGITAL_INPUTS) {
       mapTable[idx].enabled = true;
       Serial.println("INPUT ENABLED");
       return;
@@ -511,7 +520,7 @@ void cmdEnableInput(const String& cmd) {
   } else if (input[0] == 'A') {
     int idx = input.substring(1).toInt();
     if (idx >= 0 && idx < 2) {
-      mapTable[4 + idx].enabled = true;
+      mapTable[6 + idx].enabled = true;
       Serial.println("INPUT ENABLED");
       return;
     }
@@ -649,7 +658,7 @@ void processSerial() {
       break;
 
     case CMD_LIST:
-      Serial.println("D0 D1 D2 D3 A0 A1");
+      Serial.println("D0 D1 D2 D3 D4 D5 A0 A1");
       break;
 
     case CMD_RESET:
@@ -704,11 +713,13 @@ void setup() {
   delay(100);
   Serial.println("\n\n=== BLE USB Slave Starting ===\n");
 
-  // Configure pin modes
+  // Configure pin modes (6 digital inputs)
   pinMode(D0, INPUT_PULLUP);
   pinMode(D1, INPUT_PULLUP);
   pinMode(D2, INPUT_PULLUP);
   pinMode(D3, INPUT_PULLUP);
+  pinMode(D4, INPUT_PULLUP);
+  pinMode(D5, INPUT_PULLUP);
   pinMode(ENC_A, INPUT_PULLUP);
   pinMode(ENC_B, INPUT_PULLUP);
 
