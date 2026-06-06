@@ -7,7 +7,7 @@
 #include <MPU6050_light.h>
 
 //================================================
-// PIN DEFINITIONS (6 BUTTONS + 1 ANALOG AXIS + MPU6050)
+// PIN DEFINITIONS (6 BUTTONS + 2 TRIGGER BUTTONS + MPU6050)
 //================================================
 
 #define D0 21
@@ -16,8 +16,8 @@
 #define D3 18
 #define D4 17
 #define D5 16
-#define A0 39
-// A1 removed - replaced with MPU6050
+#define TRIGGER_RIGHT 25  // Right trigger (axis to max)
+#define TRIGGER_LEFT 26   // Left trigger (axis to min)
 
 // MPU6050 I2C pins
 #define SDA_PIN 22
@@ -32,7 +32,7 @@
 #define AXIS_MIN -32767
 #define AXIS_MAX 32767
 #define MAX_BUTTONS 32
-#define MAX_DIGITAL_INPUTS 6
+#define MAX_DIGITAL_INPUTS 8  // 6 buttons + 2 triggers
 #define MAX_AXES 2
 #define ESP_NOW_SEND_INTERVAL 5  // milliseconds
 #define DEVICE_NAME_SIZE 32
@@ -98,11 +98,18 @@ BleGamepad bleGamepad(deviceName, "LEHIVXX", 100);
 
 uint8_t masterAddress[MAC_ADDRESS_SIZE] = {0xCC, 0x8D, 0xA2, 0xEC, 0xDC, 0xAC};
 
-bool digitalState[6];
-bool digitalPrevState[6];
-uint16_t analogInputs[2];
+bool digitalState[8];  // 6 buttons + 2 triggers
+bool digitalPrevState[8];
 uint32_t buttons = 0;
 int16_t axis[MAX_AXES];
+
+//================================================
+// TRIGGER STATE
+//================================================
+
+bool triggerRightPressed = false;
+bool triggerLeftPressed = false;
+int16_t triggerAxis = 0;  // Axis 0 controlled by triggers
 
 //================================================
 // MPU6050 STATE
@@ -285,7 +292,13 @@ void readInputs() {
   digitalState[4] = !digitalRead(D4);
   digitalState[5] = !digitalRead(D5);
 
-  // Process button press/release
+  // Read trigger inputs (GPIO 25, 26)
+  triggerRightPressed = !digitalRead(TRIGGER_RIGHT);
+  triggerLeftPressed = !digitalRead(TRIGGER_LEFT);
+  digitalState[6] = triggerRightPressed;
+  digitalState[7] = triggerLeftPressed;
+
+  // Process button press/release for D0-D5
   for (int i = 0; i < 6; i++) {
     if (digitalState[i] && !digitalPrevState[i]) {
       // Button pressed
@@ -301,36 +314,18 @@ void readInputs() {
     digitalPrevState[i] = digitalState[i];
   }
 
-  // Read analog input A0
-  analogInputs[0] = analogRead(A0);
-  
-  // Read MPU6050 smoothed value for axis 1
-  // No need to read analogInputs[1] - it's now populated by readMPU6050()
-}
-
-//================================================
-// ANALOG PROCESSING
-//================================================
-
-int16_t processAnalog(uint8_t index, int raw) {
-  if (index >= 2) return 0;
-
-  AnalogConfig& cfg = analogCfg[index];
-
-  // Apply deadzone
-  if (abs(raw - ANALOG_CENTER) < cfg.deadzone) {
-    raw = ANALOG_CENTER;
+  // Process triggers for axis 0
+  // Right trigger (GPIO 25): axis goes to max
+  // Left trigger (GPIO 26): axis goes to min
+  // Both released or both pressed: axis goes to center
+  if (triggerRightPressed && !triggerLeftPressed) {
+    triggerAxis = AXIS_MAX;
+  } else if (!triggerRightPressed && triggerLeftPressed) {
+    triggerAxis = AXIS_MIN;
+  } else {
+    // Both released or both pressed -> center
+    triggerAxis = 0;
   }
-
-  // Map to output range
-  long v = map(raw, 0, ANALOG_RES, cfg.outMin, cfg.outMax);
-
-  // Apply inversion
-  if (cfg.invert) {
-    v = -v;
-  }
-
-  return constrain(v, cfg.outMin, cfg.outMax);
 }
 
 //================================================
@@ -348,8 +343,8 @@ void applyMapping() {
     }
   }
 
-  // Analog input A0 is mapped to axis 0
-  axis[0] = processAnalog(0, analogInputs[0]);
+  // Trigger-based axis 0 (right trigger = max, left trigger = min, both/none = center)
+  axis[0] = triggerAxis;
   
   // MPU6050 smoothed value is mapped to axis 1
   axis[1] = mpuAxis;
@@ -527,7 +522,7 @@ void processSerial() {
 
   switch (parseCommandType(cmd)) {
     case CMD_LIST:
-      Serial.println("D0 D1 D2 D3 D4 D5 A0 MPU6050");
+      Serial.println("D0 D1 D2 D3 D4 D5 GPIO25(TRIGGER_R) GPIO26(TRIGGER_L) MPU6050");
       break;
 
     case CMD_RESET:
@@ -574,20 +569,20 @@ void setup() {
   delay(100);
   Serial.println("\n\n=== BLE USB Slave Starting ===\n");
 
-  // Configure pin modes (6 digital inputs)
+  // Configure pin modes (6 digital inputs + 2 trigger inputs)
   pinMode(D0, INPUT_PULLUP);
   pinMode(D1, INPUT_PULLUP);
   pinMode(D2, INPUT_PULLUP);
   pinMode(D3, INPUT_PULLUP);
   pinMode(D4, INPUT_PULLUP);
   pinMode(D5, INPUT_PULLUP);
+  pinMode(TRIGGER_RIGHT, INPUT_PULLUP);
+  pinMode(TRIGGER_LEFT, INPUT_PULLUP);
 
   // Initialize previous state
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < 8; i++) {
     digitalPrevState[i] = false;
   }
-
-  analogReadResolution(12);
 
   // Load configuration
   setDefaultAnalogConfig();
