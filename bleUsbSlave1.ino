@@ -5,7 +5,7 @@
 #include <BleGamepad.h>
 
 //================================================
-// PIN DEFINITIONS (6 BUTTONS + 2 ANALOG + ENCODER)
+// PIN DEFINITIONS (6 BUTTONS + 2 ANALOG AXES)
 //================================================
 
 #define D0 21
@@ -16,8 +16,6 @@
 #define D5 16
 #define A0 39
 #define A1 36
-#define ENC_A 4
-#define ENC_B 5
 
 //================================================
 // CONFIGURATION CONSTANTS
@@ -27,15 +25,12 @@
 #define ANALOG_CENTER 2048
 #define AXIS_MIN -32767
 #define AXIS_MAX 32767
-#define MAX_MAP 8
-#define MAX_AXES 8
 #define MAX_BUTTONS 32
 #define MAX_DIGITAL_INPUTS 6
+#define MAX_AXES 2
 #define ESP_NOW_SEND_INTERVAL 5  // milliseconds
 #define DEVICE_NAME_SIZE 32
 #define MAC_ADDRESS_SIZE 6
-#define SERIAL_BUFFER_SIZE 64
-#define MAX_ENCODER_VALUE 131072
 
 //================================================
 // DEVICE MODES
@@ -48,9 +43,6 @@ enum Mode {
 };
 
 enum CommandType {
-  CMD_MAP,
-  CMD_DISABLE,
-  CMD_ENABLE,
   CMD_LIST,
   CMD_RESET,
   CMD_SAVE,
@@ -59,21 +51,12 @@ enum CommandType {
   CMD_DEADZONE,
   CMD_INVERT,
   CMD_SCALE,
-  CMD_ENCODER_AXIS,
-  CMD_ENCODER_STEP,
   CMD_UNKNOWN
 };
 
 //================================================
 // CONFIGURATION STRUCTURES
 //================================================
-
-struct InputMap {
-  uint8_t type;
-  uint8_t source;
-  uint8_t target;
-  bool enabled;
-};
 
 struct AnalogConfig {
   int deadzone;
@@ -82,15 +65,10 @@ struct AnalogConfig {
   int outMax;
 };
 
-struct EncoderConfig {
-  uint8_t axis;
-  int step;
-};
-
 typedef struct {
   char name[DEVICE_NAME_SIZE];
   uint32_t buttons;
-  int16_t axis[MAX_AXES];
+  int16_t axis[6];
 } GamepadPacket;
 
 //================================================
@@ -103,24 +81,16 @@ BleGamepad bleGamepad(deviceName, "LEHIVXX", 100);
 
 uint8_t masterAddress[MAC_ADDRESS_SIZE] = {0xCC, 0x8D, 0xA2, 0xEC, 0xDC, 0xAC};
 
-bool digitalInputs[6];
+bool digitalState[6];
+bool digitalPrevState[6];
 uint16_t analogInputs[2];
 uint32_t buttons = 0;
 int16_t axis[MAX_AXES];
 
 //================================================
-// ENCODER STATE
+// CONFIGURATION
 //================================================
 
-int encoderAccum = 0;
-int lastEncoderA = 0;
-EncoderConfig encoderCfg = {0, 1365};  // Default: axis 0, step 1365
-
-//================================================
-// INPUT MAPPING & CONFIGURATION
-//================================================
-
-InputMap mapTable[MAX_MAP];
 AnalogConfig analogCfg[2];
 Preferences prefs;
 GamepadPacket packet;
@@ -135,19 +105,6 @@ unsigned long lastESPNowSend = 0;
 // DEFAULT CONFIGURATION
 //================================================
 
-void setDefaultMapping() {
-  // Map 6 digital inputs (D0-D5) to buttons 0-5
-  mapTable[0] = {0, 0, 0, true};
-  mapTable[1] = {0, 1, 1, true};
-  mapTable[2] = {0, 2, 2, true};
-  mapTable[3] = {0, 3, 3, true};
-  mapTable[4] = {0, 4, 4, true};
-  mapTable[5] = {0, 5, 5, true};
-  // Map 2 analog inputs (A0-A1) to axes 0-1
-  mapTable[6] = {1, 0, 0, true};
-  mapTable[7] = {1, 1, 1, true};
-}
-
 void setDefaultAnalogConfig() {
   for (int i = 0; i < 2; i++) {
     analogCfg[i].deadzone = 0;
@@ -157,20 +114,12 @@ void setDefaultAnalogConfig() {
   }
 }
 
-void setDefaultEncoderConfig() {
-  encoderCfg.axis = 0;
-  encoderCfg.step = 1365;
-}
-
 //================================================
 // PERSISTENT STORAGE
 //================================================
 
 void loadConfig() {
   prefs.begin("cfg", true);
-
-  if (prefs.isKey("map"))
-    prefs.getBytes("map", mapTable, sizeof(mapTable));
 
   if (prefs.isKey("analog"))
     prefs.getBytes("analog", analogCfg, sizeof(analogCfg));
@@ -181,29 +130,22 @@ void loadConfig() {
     deviceName[sizeof(deviceName) - 1] = '\0';
   }
 
-  if (prefs.isKey("encoder"))
-    prefs.getBytes("encoder", &encoderCfg, sizeof(encoderCfg));
-
   prefs.end();
 }
 
 void saveConfig() {
   prefs.begin("cfg", false);
 
-  prefs.putBytes("map", mapTable, sizeof(mapTable));
   prefs.putBytes("analog", analogCfg, sizeof(analogCfg));
   prefs.putString("name", deviceName);
-  prefs.putBytes("encoder", &encoderCfg, sizeof(encoderCfg));
 
   prefs.end();
   Serial.println("CONFIG SAVED");
 }
 
 void resetConfig() {
-  setDefaultMapping();
   setDefaultAnalogConfig();
-  setDefaultEncoderConfig();
-  strncpy(deviceName, "ESP32_MODULE", sizeof(deviceName) - 1);
+  strncpy(deviceName, "ESP32_SLAVE", sizeof(deviceName) - 1);
   deviceName[sizeof(deviceName) - 1] = '\0';
   Serial.println("CONFIG RESET (not saved)");
 }
@@ -213,26 +155,28 @@ void resetConfig() {
 //================================================
 
 void readInputs() {
-  // Read digital inputs (6 buttons)
-  digitalInputs[0] = !digitalRead(D0);
-  digitalInputs[1] = !digitalRead(D1);
-  digitalInputs[2] = !digitalRead(D2);
-  digitalInputs[3] = !digitalRead(D3);
-  digitalInputs[4] = !digitalRead(D4);
-  digitalInputs[5] = !digitalRead(D5);
+  // Read digital inputs (6 buttons) - detect press and release
+  digitalState[0] = !digitalRead(D0);
+  digitalState[1] = !digitalRead(D1);
+  digitalState[2] = !digitalRead(D2);
+  digitalState[3] = !digitalRead(D3);
+  digitalState[4] = !digitalRead(D4);
+  digitalState[5] = !digitalRead(D5);
 
-  // Read encoder
-  int currentA = digitalRead(ENC_A);
-  
-  if (currentA != lastEncoderA) {
-    if (digitalRead(ENC_B) != currentA) {
-      encoderAccum += encoderCfg.step;
-    } else {
-      encoderAccum -= encoderCfg.step;
+  // Process button press/release
+  for (int i = 0; i < 6; i++) {
+    if (digitalState[i] && !digitalPrevState[i]) {
+      // Button pressed
+      buttons |= (1UL << i);
+    } else if (!digitalState[i] && digitalPrevState[i]) {
+      // Button released
+      buttons &= ~(1UL << i);
+    } else if (digitalState[i]) {
+      // Button held
+      buttons |= (1UL << i);
     }
-    // Clamp to valid axis range
-    encoderAccum = constrain(encoderAccum, AXIS_MIN, AXIS_MAX);
-    lastEncoderA = currentA;
+    
+    digitalPrevState[i] = digitalState[i];
   }
 
   // Read analog inputs
@@ -273,35 +217,16 @@ void applyMapping() {
   buttons = 0;
   memset(axis, 0, sizeof(axis));
 
-  // Set encoder axis
-  if (encoderCfg.axis < MAX_AXES) {
-    axis[encoderCfg.axis] = encoderAccum;
-  }
-
-  // Process mapped inputs
-  for (int i = 0; i < MAX_MAP; i++) {
-    InputMap& m = mapTable[i];
-
-    if (!m.enabled) continue;
-
-    // Digital input mapping (6 digital inputs D0-D5)
-    if (m.type == 0) {
-      if (m.source < MAX_DIGITAL_INPUTS && digitalInputs[m.source]) {
-        if (m.target < MAX_BUTTONS) {
-          buttons |= (1UL << m.target);
-        }
-      }
-    }
-    // Analog input mapping
-    else if (m.type == 1) {
-      if (m.source < 2 && m.target < MAX_AXES) {
-        // Don't overwrite encoder axis
-        if (m.target != encoderCfg.axis) {
-          axis[m.target] = processAnalog(m.source, analogInputs[m.source]);
-        }
-      }
+  // Digital inputs D0-D5 are directly mapped to buttons 0-5
+  for (int i = 0; i < 6; i++) {
+    if (digitalState[i]) {
+      buttons |= (1UL << i);
     }
   }
+
+  // Analog inputs A0-A1 are directly mapped to axes 0-1
+  axis[0] = processAnalog(0, analogInputs[0]);
+  axis[1] = processAnalog(1, analogInputs[1]);
 }
 
 //================================================
@@ -311,8 +236,8 @@ void applyMapping() {
 void updateBLE() {
   if (!bleGamepad.isConnected()) return;
 
-  // Update buttons
-  for (int i = 0; i < MAX_BUTTONS; i++) {
+  // Update buttons (6 buttons)
+  for (int i = 0; i < 6; i++) {
     if (buttons & (1UL << i)) {
       bleGamepad.press(i + 1);
     } else {
@@ -320,10 +245,10 @@ void updateBLE() {
     }
   }
 
-  // Update axes
+  // Update axes (2 axes)
   bleGamepad.setAxes(
-    axis[0], axis[1], axis[2], axis[3],
-    axis[4], axis[5], axis[6], axis[7]
+    axis[0], axis[1], 0, 0,
+    0, 0, 0, 0
   );
 }
 
@@ -335,7 +260,13 @@ void sendESPNOW() {
   strncpy(packet.name, deviceName, sizeof(packet.name) - 1);
   packet.name[sizeof(packet.name) - 1] = '\0';
   packet.buttons = buttons;
-  memcpy(packet.axis, axis, sizeof(axis));
+  // Copy 2 axes, rest are 0
+  packet.axis[0] = axis[0];
+  packet.axis[1] = axis[1];
+  packet.axis[2] = 0;
+  packet.axis[3] = 0;
+  packet.axis[4] = 0;
+  packet.axis[5] = 0;
 
   esp_now_send(masterAddress, (uint8_t*)&packet, sizeof(packet));
 }
@@ -363,15 +294,18 @@ void initESPNow() {
 
 //================================================
 // MODE DETECTION
+// D0 pressed = BLE MODE
+// D1 pressed = ESP-NOW MODE
+// Otherwise = HYBRID MODE
 //================================================
 
 void detectMode() {
-  bool b1 = !digitalRead(D0);
-  bool b2 = !digitalRead(D1);
+  bool d0 = !digitalRead(D0);
+  bool d1 = !digitalRead(D1);
 
-  if (b1 && !b2) {
+  if (d0 && !d1) {
     deviceMode = MODE_BLE_ONLY;
-  } else if (!b1 && b2) {
+  } else if (!d0 && d1) {
     deviceMode = MODE_ESPNOW_ONLY;
   } else {
     deviceMode = MODE_HYBRID;
@@ -382,26 +316,7 @@ void detectMode() {
 // SERIAL COMMAND PARSING
 //================================================
 
-int axisNameToIndex(const String& name) {
-  String s = name;
-  s.toUpperCase();
-
-  if (s == "X") return 0;
-  if (s == "Y") return 1;
-  if (s == "Z") return 2;
-  if (s == "RX") return 3;
-  if (s == "RY") return 4;
-  if (s == "RZ") return 5;
-  if (s == "SL1") return 6;
-  if (s == "SL2") return 7;
-
-  return -1;
-}
-
 CommandType parseCommandType(const String& cmd) {
-  if (cmd.startsWith("MAP")) return CMD_MAP;
-  if (cmd.startsWith("DISABLE")) return CMD_DISABLE;
-  if (cmd.startsWith("ENABLE")) return CMD_ENABLE;
   if (cmd == "LISTINPUTS") return CMD_LIST;
   if (cmd == "RESETCONFIG") return CMD_RESET;
   if (cmd == "SAVE") return CMD_SAVE;
@@ -410,122 +325,7 @@ CommandType parseCommandType(const String& cmd) {
   if (cmd.startsWith("DEADZONE")) return CMD_DEADZONE;
   if (cmd.startsWith("INVERT")) return CMD_INVERT;
   if (cmd.startsWith("SCALE")) return CMD_SCALE;
-  if (cmd.startsWith("ENCODERAXIS")) return CMD_ENCODER_AXIS;
-  if (cmd.startsWith("ENCODERSTEP")) return CMD_ENCODER_STEP;
   return CMD_UNKNOWN;
-}
-
-void cmdMapDigital(const String& cmd) {
-  char in[8] = {0};
-  char tgt[8] = {0};
-
-  if (sscanf(cmd.c_str(), "MAP %7s %7s", in, tgt) != 2) {
-    Serial.println("INVALID MAP SYNTAX");
-    return;
-  }
-
-  String input(in);
-  String target(tgt);
-  input.toUpperCase();
-  target.toUpperCase();
-
-  int src = input.substring(1).toInt();
-  if (src < 0 || src >= MAX_DIGITAL_INPUTS) {
-    Serial.println("INVALID DIGITAL SOURCE (D0-D5)");
-    return;
-  }
-
-  int btn = target.substring(1).toInt();
-  if (btn < 0 || btn >= MAX_BUTTONS) {
-    Serial.println("INVALID BUTTON TARGET");
-    return;
-  }
-
-  mapTable[src].type = 0;
-  mapTable[src].source = src;
-  mapTable[src].target = btn;
-  mapTable[src].enabled = true;
-
-  Serial.println("DIGITAL MAP UPDATED");
-}
-
-void cmdMapAnalog(const String& cmd) {
-  char in[8] = {0};
-  char tgt[8] = {0};
-
-  if (sscanf(cmd.c_str(), "MAP %7s %7s", in, tgt) != 2) {
-    Serial.println("INVALID MAP SYNTAX");
-    return;
-  }
-
-  String input(in);
-  String target(tgt);
-  input.toUpperCase();
-  target.toUpperCase();
-
-  int src = input.substring(1).toInt();
-  if (src < 0 || src >= 2) {
-    Serial.println("INVALID ANALOG SOURCE (A0-A1)");
-    return;
-  }
-
-  int axisIndex = axisNameToIndex(target);
-  if (axisIndex < 0) {
-    Serial.println("INVALID AXIS TARGET");
-    return;
-  }
-
-  int mapIndex = 6 + src;
-  mapTable[mapIndex].type = 1;
-  mapTable[mapIndex].source = src;
-  mapTable[mapIndex].target = axisIndex;
-  mapTable[mapIndex].enabled = true;
-
-  Serial.println("ANALOG MAP UPDATED");
-}
-
-void cmdDisableInput(const String& cmd) {
-  String input = cmd.substring(8);
-  input.toUpperCase();
-
-  if (input[0] == 'D') {
-    int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < MAX_DIGITAL_INPUTS) {
-      mapTable[idx].enabled = false;
-      Serial.println("INPUT DISABLED");
-      return;
-    }
-  } else if (input[0] == 'A') {
-    int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < 2) {
-      mapTable[6 + idx].enabled = false;
-      Serial.println("INPUT DISABLED");
-      return;
-    }
-  }
-  Serial.println("INVALID INPUT");
-}
-
-void cmdEnableInput(const String& cmd) {
-  String input = cmd.substring(7);
-  input.toUpperCase();
-
-  if (input[0] == 'D') {
-    int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < MAX_DIGITAL_INPUTS) {
-      mapTable[idx].enabled = true;
-      Serial.println("INPUT ENABLED");
-      return;
-    }
-  } else if (input[0] == 'A') {
-    int idx = input.substring(1).toInt();
-    if (idx >= 0 && idx < 2) {
-      mapTable[6 + idx].enabled = true;
-      Serial.println("INPUT ENABLED");
-      return;
-    }
-  }
-  Serial.println("INVALID INPUT");
 }
 
 void cmdSetName(const String& cmd) {
@@ -591,44 +391,6 @@ void cmdScale(const String& cmd) {
   Serial.println("SCALE UPDATED");
 }
 
-void cmdEncoderAxis(const String& cmd) {
-  int axisNum;
-
-  if (sscanf(cmd.c_str(), "ENCODERAXIS %d", &axisNum) != 1) {
-    Serial.println("INVALID ENCODERAXIS SYNTAX");
-    return;
-  }
-
-  if (axisNum < 0 || axisNum >= MAX_AXES) {
-    Serial.print("INVALID AXIS (0-");
-    Serial.print(MAX_AXES - 1);
-    Serial.println(")");
-    return;
-  }
-
-  encoderCfg.axis = axisNum;
-  Serial.print("ENCODER AXIS SET TO: ");
-  Serial.println(axisNum);
-}
-
-void cmdEncoderStep(const String& cmd) {
-  int step;
-
-  if (sscanf(cmd.c_str(), "ENCODERSTEP %d", &step) != 1) {
-    Serial.println("INVALID ENCODERSTEP SYNTAX");
-    return;
-  }
-
-  if (step <= 0) {
-    Serial.println("STEP MUST BE POSITIVE");
-    return;
-  }
-
-  encoderCfg.step = step;
-  Serial.print("ENCODER STEP SET TO: ");
-  Serial.println(step);
-}
-
 void processSerial() {
   if (!Serial.available()) return;
 
@@ -638,25 +400,6 @@ void processSerial() {
   if (cmd.length() == 0) return;
 
   switch (parseCommandType(cmd)) {
-    case CMD_MAP:
-      if (cmd[4] == ' ') {
-        char nextChar = (cmd.length() > 5) ? cmd[5] : ' ';
-        if (nextChar == 'D') {
-          cmdMapDigital(cmd);
-        } else if (nextChar == 'A') {
-          cmdMapAnalog(cmd);
-        }
-      }
-      break;
-
-    case CMD_DISABLE:
-      cmdDisableInput(cmd);
-      break;
-
-    case CMD_ENABLE:
-      cmdEnableInput(cmd);
-      break;
-
     case CMD_LIST:
       Serial.println("D0 D1 D2 D3 D4 D5 A0 A1");
       break;
@@ -689,14 +432,6 @@ void processSerial() {
       cmdScale(cmd);
       break;
 
-    case CMD_ENCODER_AXIS:
-      cmdEncoderAxis(cmd);
-      break;
-
-    case CMD_ENCODER_STEP:
-      cmdEncoderStep(cmd);
-      break;
-
     default:
       Serial.println("UNKNOWN COMMAND");
       break;
@@ -720,17 +455,16 @@ void setup() {
   pinMode(D3, INPUT_PULLUP);
   pinMode(D4, INPUT_PULLUP);
   pinMode(D5, INPUT_PULLUP);
-  pinMode(ENC_A, INPUT_PULLUP);
-  pinMode(ENC_B, INPUT_PULLUP);
 
-  // Initialize encoder
-  lastEncoderA = digitalRead(ENC_A);
+  // Initialize previous state
+  for (int i = 0; i < 6; i++) {
+    digitalPrevState[i] = false;
+  }
+
   analogReadResolution(12);
 
   // Load configuration
-  setDefaultMapping();
   setDefaultAnalogConfig();
-  setDefaultEncoderConfig();
   loadConfig();
 
   // Detect operation mode
@@ -777,4 +511,6 @@ void loop() {
   }
 
   processSerial();
+  
+  delay(5);
 }
