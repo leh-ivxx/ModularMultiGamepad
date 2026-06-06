@@ -10,7 +10,7 @@
 // PIN DEFINITIONS (6 BUTTONS + 2 TRIGGER BUTTONS + MPU6050)
 //================================================
 
-#define D0 21
+#define D0 27
 #define D1 14
 #define D2 19
 #define D3 18
