@@ -92,7 +92,7 @@ typedef struct {
 //================================================
 
 Mode deviceMode;
-char deviceName[DEVICE_NAME_SIZE] = "GP3-RS1";
+char deviceName[DEVICE_NAME_SIZE] = "EGP-01";
 BleGamepad bleGamepad(deviceName, "LEHIVXX", 100);
 
 uint8_t masterAddress[MAC_ADDRESS_SIZE] = {0xCC, 0x8D, 0xA2, 0xEC, 0xDC, 0xAC};
