@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_now.h>
-#include <Keypad.h>
 #include <Adafruit_NeoPixel.h>
 
 #include "USB.h"
@@ -19,39 +18,23 @@
 Adafruit_NeoPixel rgb_led = Adafruit_NeoPixel(NUM_RGB_LEDS, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
 
 //================================================
-// KEYPAD CONFIGURATION (4x3 MATRIX)
+// DIGITAL INPUT DEFINITIONS (8 GPIO PINS)
 //================================================
-#define B1 1
-#define B2 2
-#define ROWS 4
-#define COLS 3
-
-#define C1 15
-#define C2 6
-#define C3 17
-#define R1 16
-#define R2 4
-#define R3 5
-#define R4 7
-
-byte rowPins[ROWS] = {R1, R2, R3, R4};
-byte colPins[COLS] = {C1, C2, C3};
-
-char hexaKeys[ROWS][COLS] = {
-  {'0', '1', '2'},
-  {'3', '4', '5'},
-  {'6', '7', '8'},
-  {'9', 'A', 'B'}
-};
-
-Keypad keypad = Keypad(makeKeymap(hexaKeys), rowPins, colPins, ROWS, COLS);
+#define D0 1
+#define D1 2
+#define D2 4
+#define D3 5
+#define D4 6
+#define D5 7
+#define D6 15
+#define D7 16
 
 //================================================
 // SYSTEM LIMITS
 //================================================
 
-#define MAX_BUTTONS 30    // 12 master + 6 per slave * 3 = 30 total
-#define MAX_AXES 8
+#define MAX_BUTTONS 26    // 8 master + 6 per slave * 3 = 26 total
+#define MAX_AXES 6        // 2 axes per slave * 3 = 6 total
 #define MAX_SLAVES 3
 
 //================================================
@@ -84,6 +67,13 @@ uint32_t buttons = 0;
 int16_t axis[MAX_AXES];
 
 //================================================
+// DIGITAL INPUT STATE
+//================================================
+
+bool digitalState[8];
+bool digitalPrevState[8];
+
+//================================================
 // USB + BLE DEVICES
 //================================================
 
@@ -98,7 +88,7 @@ typedef struct
 {
   char name[32];
   uint32_t buttons;
-  int16_t axis[8];
+  int16_t axis[6];
 
 } GamepadPacket;
 
@@ -310,33 +300,45 @@ void initESPNow()
 }
 
 //================================================
-// READ MASTER BUTTONS - 4x3 KEYPAD
+// READ MASTER BUTTONS - 8 DIGITAL INPUTS
+// D0-D7 map to gamepad buttons 1-8
 //================================================
 
 void readLocalButtons()
 {
-  if (keypad.getKeys()) {
-    for (int i = 0; i < LIST_MAX; i++) {
-      if (keypad.key[i].stateChanged) {
-        int buttonIndex = keypad.key[i].kchar - '0';
-        
-        if (buttonIndex >= 0 && buttonIndex < 12) {
-          if (keypad.key[i].state == PRESSED) {
-            buttons |= (1UL << buttonIndex);
-          } else if (keypad.key[i].state == RELEASED) {
-            buttons &= ~(1UL << buttonIndex);
-          }
-        }
-      }
+  // Read current state of all 8 digital inputs
+  digitalState[0] = !digitalRead(D0);
+  digitalState[1] = !digitalRead(D1);
+  digitalState[2] = !digitalRead(D2);
+  digitalState[3] = !digitalRead(D3);
+  digitalState[4] = !digitalRead(D4);
+  digitalState[5] = !digitalRead(D5);
+  digitalState[6] = !digitalRead(D6);
+  digitalState[7] = !digitalRead(D7);
+
+  // Process press and release events
+  for (int i = 0; i < 8; i++) {
+    if (digitalState[i] && !digitalPrevState[i]) {
+      // Button pressed
+      buttons |= (1UL << i);
+    } else if (!digitalState[i] && digitalPrevState[i]) {
+      // Button released
+      buttons &= ~(1UL << i);
+    } else if (digitalState[i]) {
+      // Button held
+      buttons |= (1UL << i);
     }
+    
+    digitalPrevState[i] = digitalState[i];
   }
 }
 
 //================================================
 // MERGE SLAVE INPUTS
-// Slave 1 buttons: 12-17 (6 buttons)
-// Slave 2 buttons: 18-23 (6 buttons)
-// Slave 3 buttons: 24-29 (6 buttons)
+// Slave 1 buttons: 8-13 (6 buttons)
+// Slave 2 buttons: 14-19 (6 buttons)
+// Slave 3 buttons: 20-25 (6 buttons)
+// Slave axes: axes 0-1 per slave
 //================================================
 
 void mergeSlaveInputs()
@@ -349,14 +351,14 @@ void mergeSlaveInputs()
     if (now - slaves[i].lastSeen > 1000)
       continue;
 
-    // Offset slave buttons by 12 + (slave_id * 6)
-    uint32_t slaveButtons = slaves[i].data.buttons << (12 + (i * 6));
+    // Offset slave buttons by 8 + (slave_id * 6)
+    uint32_t slaveButtons = slaves[i].data.buttons << (8 + (i * 6));
     buttons |= slaveButtons;
 
-    // Merge axes
-    for (int a = 0; a < MAX_AXES; a++) {
+    // Merge axes (each slave has 2 axes)
+    for (int a = 0; a < 2; a++) {
       if (slaves[i].data.axis[a] != 0)
-        axis[a] = slaves[i].data.axis[a];
+        axis[i * 2 + a] = slaves[i].data.axis[a];
     }
   }
 }
@@ -410,29 +412,30 @@ void updateBLE()
     axis[3],
     axis[4],
     axis[5],
-    axis[6],
-    axis[7]
+    0,
+    0
   );
 }
 
 //================================================
 // DETECT MODE - STARTUP BUTTON DETECTION
-// B1 (0) pressed = BLE MODE
-// B2 (1) pressed = USB + BLE DUAL MODE
+// D0 pressed = BLE MODE
+// D1 pressed = USB + BLE DUAL MODE
 // None pressed = USB MODE (default)
+// Mode buttons must be held during startup
 //================================================
 
 void detectMode()
 {
   delay(100);  // Debounce delay
   
-  bool b1 = !digitalRead(B1);  // Button 0 (Row1, Col1)
-  bool b2 = !digitalRead(B2);  // Button 1 (Row1, Col2)
+  bool d0 = !digitalRead(D0);  // Mode button 0
+  bool d1 = !digitalRead(D1);  // Mode button 1
 
-  if (b1) {
+  if (d0) {
     mode = MODE_BLE_ONLY;
     Serial.println("BLE MODE SELECTED");
-  } else if (b2) {
+  } else if (d1) {
     mode = MODE_USB_BLE_DUAL;
     Serial.println("DUAL MODE SELECTED");
   } else {
@@ -454,16 +457,29 @@ void setup()
   Serial.begin(115200);
   delay(500);
   Serial.println("\n\nESP32 Modular Gamepad Starting...");
-pinMode(B1,INPUT_PULLUP);
-  pinMode(B2,INPUT_PULLUP);
+  
+  // Initialize digital input pins
+  pinMode(D0, INPUT_PULLUP);
+  pinMode(D1, INPUT_PULLUP);
+  pinMode(D2, INPUT_PULLUP);
+  pinMode(D3, INPUT_PULLUP);
+  pinMode(D4, INPUT_PULLUP);
+  pinMode(D5, INPUT_PULLUP);
+  pinMode(D6, INPUT_PULLUP);
+  pinMode(D7, INPUT_PULLUP);
+  
+  // Initialize previous state
+  for (int i = 0; i < 8; i++) {
+    digitalPrevState[i] = false;
+  }
+
   // Initialize RGB LED
   rgb_led.begin();
   setLEDColor(255, 255, 0);  // Yellow startup
   delay(500);
   setLEDColor(0, 0, 0);
 
-  // Keypad initialized via library
-  Serial.println("Keypad initialized");
+  Serial.println("Digital inputs initialized (D0-D7)");
 
   // Detect operating mode before ESP-NOW init
   detectMode();
