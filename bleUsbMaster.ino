@@ -27,11 +27,11 @@ Adafruit_NeoPixel rgb_led = Adafruit_NeoPixel(NUM_RGB_LEDS, RGB_LED_PIN, NEO_GRB
 #define COLS 3
 
 #define C1 15
-#define C2 16
+#define C2 6
 #define C3 17
-#define R1 4
-#define R2 5
-#define R3 6
+#define R1 16
+#define R2 4
+#define R3 5
 #define R4 7
 
 byte rowPins[ROWS] = {R1, R2, R3, R4};
