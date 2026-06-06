@@ -8,12 +8,12 @@
 // PIN DEFINITIONS (6 BUTTONS + 2 ANALOG + ENCODER)
 //================================================
 
-#define D0 16
-#define D1 17
-#define D2 18
-#define D3 19
-#define D4 14
-#define D5 27
+#define D0 21
+#define D1 14
+#define D2 19
+#define D3 18
+#define D4 17
+#define D5 16
 #define A0 39
 #define A1 36
 #define ENC_A 4
@@ -98,8 +98,8 @@ typedef struct {
 //================================================
 
 Mode deviceMode;
-char deviceName[DEVICE_NAME_SIZE] = "EGP-01";
-BleGamepad bleGamepad(deviceName, "LEHIVXX", 69);
+char deviceName[DEVICE_NAME_SIZE] = "GP3-RS1";
+BleGamepad bleGamepad(deviceName, "LEHIVXX", 100);
 
 uint8_t masterAddress[MAC_ADDRESS_SIZE] = {0xCC, 0x8D, 0xA2, 0xEC, 0xDC, 0xAC};
 
@@ -113,10 +113,8 @@ int16_t axis[MAX_AXES];
 //================================================
 
 int encoderAccum = 0;
-int encoderAccum1 = 0;
-
 int lastEncoderA = 0;
-EncoderConfig encoderCfg = {0, 512};  // Default: axis 0, step 1365
+EncoderConfig encoderCfg = {0, 1365};  // Default: axis 0, step 1365
 
 //================================================
 // INPUT MAPPING & CONFIGURATION
@@ -228,12 +226,12 @@ void readInputs() {
   
   if (currentA != lastEncoderA) {
     if (digitalRead(ENC_B) != currentA) {
-      encoderAccum1 += encoderCfg.step;
+      encoderAccum += encoderCfg.step;
     } else {
-      encoderAccum1 -= encoderCfg.step;
+      encoderAccum -= encoderCfg.step;
     }
     // Clamp to valid axis range
-    encoderAccum = constrain(encoderAccum1, AXIS_MIN, AXIS_MAX);
+    encoderAccum = constrain(encoderAccum, AXIS_MIN, AXIS_MAX);
     lastEncoderA = currentA;
   }
 
@@ -374,11 +372,10 @@ void detectMode() {
   if (b1 && !b2) {
     deviceMode = MODE_BLE_ONLY;
   } else if (!b1 && b2) {
-    deviceMode = MODE_HYBRID;
+    deviceMode = MODE_ESPNOW_ONLY;
   } else {
-
-    
-  }deviceMode = MODE_ESPNOW_ONLY;
+    deviceMode = MODE_HYBRID;
+  }
 }
 
 //================================================
