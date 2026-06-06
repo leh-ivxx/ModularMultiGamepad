@@ -3,9 +3,11 @@
 #include <esp_now.h>
 #include <Preferences.h>
 #include <BleGamepad.h>
+#include <Wire.h>
+#include <MPU6050_light.h>
 
 //================================================
-// PIN DEFINITIONS (6 BUTTONS + 2 ANALOG AXES)
+// PIN DEFINITIONS (6 BUTTONS + 1 ANALOG AXIS + MPU6050)
 //================================================
 
 #define D0 21
@@ -15,7 +17,11 @@
 #define D4 17
 #define D5 16
 #define A0 39
-#define A1 36
+// A1 removed - replaced with MPU6050
+
+// MPU6050 I2C pins
+#define SDA_PIN 22
+#define SCL_PIN 21
 
 //================================================
 // CONFIGURATION CONSTANTS
@@ -31,6 +37,17 @@
 #define ESP_NOW_SEND_INTERVAL 5  // milliseconds
 #define DEVICE_NAME_SIZE 32
 #define MAC_ADDRESS_SIZE 6
+
+//================================================
+// MPU6050 SMOOTHING CONFIGURATION
+//================================================
+
+#define MPU_SAMPLE_INTERVAL_US 2000  // 2ms
+#define MPU_BUFFER_SIZE 10
+#define MPU_SMOOTHING_ALPHA 0.1f
+#define MPU_MAX_ANGLE 80.0f
+#define MPU_STEERING_GAIN 1.0f
+#define MPU_DEADZONE 0
 
 //================================================
 // DEVICE MODES
@@ -86,6 +103,19 @@ bool digitalPrevState[6];
 uint16_t analogInputs[2];
 uint32_t buttons = 0;
 int16_t axis[MAX_AXES];
+
+//================================================
+// MPU6050 STATE
+//================================================
+
+MPU6050 mpu(Wire);
+float angleOffset = 0.0f;
+float smoothedAngle = 0.0f;
+float sampleBuffer[MPU_BUFFER_SIZE];
+uint8_t sampleIndex = 0;
+uint8_t sampleCount = 0;
+unsigned long lastMPUSampleTime = 0;
+int16_t mpuAxis = 0;
 
 //================================================
 // CONFIGURATION
@@ -151,6 +181,98 @@ void resetConfig() {
 }
 
 //================================================
+// MPU6050 INITIALIZATION
+//================================================
+
+void initMPU6050() {
+  Wire.begin(SDA_PIN, SCL_PIN);
+  
+  Serial.println("Initializing MPU6050...");
+  byte status = mpu.begin();
+
+  if (status != 0) {
+    Serial.print("MPU6050 Error: ");
+    Serial.println(status);
+    while (1) {
+      delay(100);
+    }
+  }
+
+  delay(1000);
+  Serial.println("Calibrating MPU6050...");
+  mpu.calcOffsets(true, true);
+
+  // Initialize smoothing buffers
+  for (int i = 0; i < MPU_BUFFER_SIZE; i++) {
+    sampleBuffer[i] = 0.0f;
+  }
+
+  angleOffset = 0.0f;
+  smoothedAngle = 0.0f;
+  sampleIndex = 0;
+  sampleCount = 0;
+  lastMPUSampleTime = 0;
+  mpuAxis = 0;
+
+  Serial.println("MPU6050 Ready");
+}
+
+//================================================
+// MPU6050 READING WITH SMOOTHING
+//================================================
+
+void readMPU6050() {
+  // Update MPU continuously
+  mpu.update();
+
+  unsigned long now = micros();
+
+  // Sample at specified interval
+  if ((now - lastMPUSampleTime) >= MPU_SAMPLE_INTERVAL_US) {
+    lastMPUSampleTime = now;
+
+    // Get relative angle
+    float rawAngle = mpu.getAngleX() - angleOffset;
+
+    // Exponential smoothing
+    smoothedAngle = (MPU_SMOOTHING_ALPHA * rawAngle) + ((1.0f - MPU_SMOOTHING_ALPHA) * smoothedAngle);
+    smoothedAngle = constrain(smoothedAngle, -MPU_MAX_ANGLE, MPU_MAX_ANGLE);
+
+    // Store in circular buffer
+    sampleBuffer[sampleIndex] = smoothedAngle;
+    sampleIndex++;
+
+    if (sampleIndex >= MPU_BUFFER_SIZE)
+      sampleIndex = 0;
+
+    if (sampleCount < MPU_BUFFER_SIZE)
+      sampleCount++;
+
+    // Calculate average every 10 samples
+    if (sampleCount == MPU_BUFFER_SIZE && sampleIndex == 0) {
+      float sum = 0.0f;
+
+      for (int i = 0; i < MPU_BUFFER_SIZE; i++) {
+        sum += sampleBuffer[i];
+      }
+
+      float avgAngle = sum / MPU_BUFFER_SIZE;
+      avgAngle = constrain(avgAngle, -MPU_MAX_ANGLE, MPU_MAX_ANGLE);
+
+      // Linear steering mapping
+      float normalized = avgAngle / MPU_MAX_ANGLE;
+      float scaled = normalized * MPU_STEERING_GAIN;
+      scaled = constrain(scaled, -1.0f, 1.0f);
+
+      mpuAxis = (int16_t)(scaled * AXIS_MAX);
+
+      if (abs(mpuAxis) < MPU_DEADZONE)
+        mpuAxis = 0;
+    }
+  }
+}
+
+//================================================
 // INPUT READING
 //================================================
 
@@ -179,9 +301,11 @@ void readInputs() {
     digitalPrevState[i] = digitalState[i];
   }
 
-  // Read analog inputs
+  // Read analog input A0
   analogInputs[0] = analogRead(A0);
-  analogInputs[1] = analogRead(A1);
+  
+  // Read MPU6050 smoothed value for axis 1
+  // No need to read analogInputs[1] - it's now populated by readMPU6050()
 }
 
 //================================================
@@ -224,9 +348,11 @@ void applyMapping() {
     }
   }
 
-  // Analog inputs A0-A1 are directly mapped to axes 0-1
+  // Analog input A0 is mapped to axis 0
   axis[0] = processAnalog(0, analogInputs[0]);
-  axis[1] = processAnalog(1, analogInputs[1]);
+  
+  // MPU6050 smoothed value is mapped to axis 1
+  axis[1] = mpuAxis;
 }
 
 //================================================
@@ -401,7 +527,7 @@ void processSerial() {
 
   switch (parseCommandType(cmd)) {
     case CMD_LIST:
-      Serial.println("D0 D1 D2 D3 D4 D5 A0 A1");
+      Serial.println("D0 D1 D2 D3 D4 D5 A0 MPU6050");
       break;
 
     case CMD_RESET:
@@ -467,6 +593,9 @@ void setup() {
   setDefaultAnalogConfig();
   loadConfig();
 
+  // Initialize MPU6050
+  initMPU6050();
+
   // Detect operation mode
   detectMode();
   Serial.print("Mode: ");
@@ -494,6 +623,9 @@ void setup() {
 //================================================
 
 void loop() {
+  // Read MPU6050 with smoothing
+  readMPU6050();
+
   readInputs();
   applyMapping();
 
