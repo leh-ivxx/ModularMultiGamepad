@@ -18,6 +18,7 @@
 #define D5 16
 #define TRIGGER_RIGHT 25  // Right trigger (Z axis to max)
 #define TRIGGER_LEFT 26   // Left trigger (Z axis to min)
+#define ZERO_BUTTON_PIN 23
 
 // MPU6050 I2C pins
 #define SDA_PIN 22
@@ -126,6 +127,10 @@ uint8_t sampleCount = 0;
 unsigned long lastMPUSampleTime = 0;
 int16_t mpuAxis = 0;
 
+// Zero button state
+bool zeroButtonState = false;
+bool lastZeroButtonState = false;
+
 //================================================
 // CONFIGURATION
 //================================================
@@ -197,7 +202,7 @@ void resetConfig() {
 
 void initMPU6050() {
   Wire.begin(SDA_PIN, SCL_PIN);
-  
+
   Serial.println("Initializing MPU6050...");
   byte status = mpu.begin();
 
@@ -235,25 +240,59 @@ void initMPU6050() {
 
 void readMPU6050() {
   if (!mpu6050_enabled) return;
-  
+
   // Update MPU continuously
   mpu.update();
 
+  // =====================================
+  // Zero Button
+  // =====================================
+  zeroButtonState = (digitalRead(ZERO_BUTTON_PIN) == LOW);
+
+  if (zeroButtonState && !lastZeroButtonState) {
+
+    angleOffset = mpu.getAngleX();
+
+    smoothedAngle = 0.0f;
+
+    for (int i = 0; i < MPU_BUFFER_SIZE; i++) {
+      sampleBuffer[i] = 0.0f;
+    }
+
+    sampleIndex = 0;
+    sampleCount = 0;
+
+    Serial.println("Angle Zeroed");
+  }
+
+  lastZeroButtonState = zeroButtonState;
+
+  // =====================================
+  // 2ms Sample Rate
+  // =====================================
   unsigned long now = micros();
 
-  // Sample at specified interval
   if ((now - lastMPUSampleTime) >= MPU_SAMPLE_INTERVAL_US) {
+
     lastMPUSampleTime = now;
 
-    // Get relative angle
+    // Relative angle
     float rawAngle = mpu.getAngleX() - angleOffset;
 
     // Exponential smoothing
-    smoothedAngle = (MPU_SMOOTHING_ALPHA * rawAngle) + ((1.0f - MPU_SMOOTHING_ALPHA) * smoothedAngle);
-    smoothedAngle = constrain(smoothedAngle, -MPU_MAX_ANGLE, MPU_MAX_ANGLE);
+    smoothedAngle =
+      MPU_SMOOTHING_ALPHA * rawAngle +
+      (1.0f - MPU_SMOOTHING_ALPHA) * smoothedAngle;
 
-    // Store in circular buffer
+    smoothedAngle = constrain(
+      smoothedAngle,
+      -MPU_MAX_ANGLE,
+      MPU_MAX_ANGLE
+    );
+
+    // Store sample
     sampleBuffer[sampleIndex] = smoothedAngle;
+
     sampleIndex++;
 
     if (sampleIndex >= MPU_BUFFER_SIZE)
@@ -262,8 +301,11 @@ void readMPU6050() {
     if (sampleCount < MPU_BUFFER_SIZE)
       sampleCount++;
 
-    // Calculate average whenever buffer is full
-    if (sampleCount == MPU_BUFFER_SIZE) {
+    // =====================================
+    // Every 10 samples calculate average
+    // =====================================
+    if (sampleCount == MPU_BUFFER_SIZE && sampleIndex == 0) {
+
       float sum = 0.0f;
 
       for (int i = 0; i < MPU_BUFFER_SIZE; i++) {
@@ -271,14 +313,30 @@ void readMPU6050() {
       }
 
       float avgAngle = sum / MPU_BUFFER_SIZE;
-      avgAngle = constrain(avgAngle, -MPU_MAX_ANGLE, MPU_MAX_ANGLE);
 
-      // Linear steering mapping from -80 to 80 degrees
+      avgAngle = constrain(
+        avgAngle,
+        -MPU_MAX_ANGLE,
+        MPU_MAX_ANGLE
+      );
+
+      // =====================================
+      // Adjustable Linear Steering Mapping
+      // =====================================
+
       float normalized = avgAngle / MPU_MAX_ANGLE;
-      float scaled = normalized * MPU_STEERING_GAIN;
-      scaled = constrain(scaled, -1.0f, 1.0f);
 
-      mpuAxis = (int16_t)(scaled * AXIS_MAX);
+      float scaled =
+        normalized * MPU_STEERING_GAIN;
+
+      scaled = constrain(
+        scaled,
+        -1.0f,
+        1.0f
+      );
+
+      mpuAxis =
+        (int16_t)(scaled * AXIS_MAX);
 
       if (abs(mpuAxis) < MPU_DEADZONE)
         mpuAxis = 0;
@@ -374,7 +432,7 @@ void applyMapping() {
 
   // MPU6050 smoothed value (-80 to 80 degrees) is mapped to axis 0 (left stick X) with configuration applied
   axis[0] = applyAxisConfig(mpuAxis, 0);
-  
+
   // Trigger-based axis 1 (Z axis) with configuration applied
   axis[1] = applyAxisConfig(triggerAxis, 1);
 }
@@ -391,7 +449,7 @@ void updateBLE() {
     for (int i = 0; i < 6; i++) {
       bool wasPressed = (lastButtons & (1UL << i)) != 0;
       bool isPressed = (buttons & (1UL << i)) != 0;
-      
+
       if (wasPressed != isPressed) {
         if (isPressed) {
           bleGamepad.press(i + 1);
@@ -431,7 +489,7 @@ void sendESPNOW() {
 
 void initESPNow() {
   WiFi.mode(WIFI_STA);
-  
+
   if (esp_now_init() != ESP_OK) {
     Serial.println("ESP-NOW INIT FAILED");
     return;
@@ -459,7 +517,7 @@ void initESPNow() {
 
 void detectMode() {
   delay(100);  // Debounce delay
-  
+
   bool d0 = !digitalRead(D0);
   bool d1 = !digitalRead(D1);
 
@@ -490,17 +548,17 @@ CommandType parseCommandType(const String& cmd) {
 
 void cmdSetName(const String& cmd) {
   String name = cmd.substring(5);
-  
+
   if (name.length() == 0) {
     Serial.println("NAME EMPTY");
     return;
   }
-  
+
   if (name.length() >= DEVICE_NAME_SIZE) {
     Serial.println("NAME TOO LONG");
     return;
   }
-  
+
   name.toCharArray(deviceName, sizeof(deviceName) - 1);
   deviceName[sizeof(deviceName) - 1] = '\0';
   Serial.print("NAME SET TO: ");
@@ -632,11 +690,11 @@ void processSerial() {
 
 void setup() {
   Serial.begin(115200);
-  
+
   delay(100);
   Serial.println("\n\n=== BLE USB Slave Starting (Refactored) ===\n");
 
-  // Configure pin modes (6 digital inputs + 2 trigger inputs)
+  // Configure pin modes (6 digital inputs + 2 trigger inputs + zero button)
   pinMode(D0, INPUT_PULLUP);
   pinMode(D1, INPUT_PULLUP);
   pinMode(D2, INPUT_PULLUP);
@@ -645,6 +703,7 @@ void setup() {
   pinMode(D5, INPUT_PULLUP);
   pinMode(TRIGGER_RIGHT, INPUT_PULLUP);
   pinMode(TRIGGER_LEFT, INPUT_PULLUP);
+  pinMode(ZERO_BUTTON_PIN, INPUT_PULLUP);
 
   // Initialize previous state
   for (int i = 0; i < 8; i++) {
@@ -706,6 +765,6 @@ void loop() {
   }
 
   processSerial();
-  
+
   delay(5);
 }
