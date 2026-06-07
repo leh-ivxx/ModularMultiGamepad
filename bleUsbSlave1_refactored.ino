@@ -31,7 +31,7 @@
 #define AXIS_MAX 32767
 #define MAX_BUTTONS 32
 #define MAX_DIGITAL_INPUTS 8  // 6 buttons + 2 triggers
-#define MAX_AXES 3
+#define MAX_AXES 2
 #define ESP_NOW_SEND_INTERVAL 5  // milliseconds
 #define DEVICE_NAME_SIZE 32
 #define MAC_ADDRESS_SIZE 6
@@ -110,7 +110,7 @@ int16_t axis[MAX_AXES];
 
 bool triggerRightPressed = false;
 bool triggerLeftPressed = false;
-int16_t triggerAxis = 0;  // Axis 2 (Z axis) controlled by triggers
+int16_t triggerAxis = 0;  // Axis 1 controlled by triggers
 
 //================================================
 // MPU6050 STATE
@@ -130,7 +130,7 @@ int16_t mpuAxis = 0;
 // CONFIGURATION
 //================================================
 
-AnalogConfig analogCfg[3];
+AnalogConfig analogCfg[2];
 Preferences prefs;
 GamepadPacket packet;
 
@@ -145,7 +145,7 @@ unsigned long lastESPNowSend = 0;
 //================================================
 
 void setDefaultAnalogConfig() {
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 2; i++) {
     analogCfg[i].deadzone = 0;
     analogCfg[i].invert = false;
     analogCfg[i].outMin = AXIS_MIN;
@@ -291,7 +291,7 @@ void readMPU6050() {
 //================================================
 
 int16_t applyAxisConfig(int16_t value, int axisIdx) {
-  if (axisIdx < 0 || axisIdx >= 3)
+  if (axisIdx < 0 || axisIdx >= 2)
     return value;
 
   // Apply deadzone
@@ -343,7 +343,7 @@ void readInputs() {
   triggerRightPressed = !digitalRead(TRIGGER_RIGHT);
   triggerLeftPressed = !digitalRead(TRIGGER_LEFT);
 
-  // Process triggers for axis 2 (Z axis)
+  // Process triggers for axis 1 (Z axis)
   // Right trigger (GPIO 25): Z axis goes to max
   // Left trigger (GPIO 26): Z axis goes to min
   // Both released or both pressed: Z axis goes to center
@@ -375,11 +375,8 @@ void applyMapping() {
   // MPU6050 smoothed value (-80 to 80 degrees) is mapped to axis 0 (left stick X) with configuration applied
   axis[0] = applyAxisConfig(mpuAxis, 0);
   
-  // Axis 1 unused (set to 0)
-  axis[1] = 0;
-  
-  // Trigger-based axis 2 (Z axis) with configuration applied
-  axis[2] = applyAxisConfig(triggerAxis, 2);
+  // Trigger-based axis 1 (Z axis) with configuration applied
+  axis[1] = applyAxisConfig(triggerAxis, 1);
 }
 
 //================================================
@@ -406,9 +403,9 @@ void updateBLE() {
     lastButtons = buttons;
   }
 
-  // Update axes (3 axes: X, Y, Z)
+  // Update axes (2 axes)
   bleGamepad.setAxes(
-    axis[0], axis[1], axis[2], 0,
+    axis[0], axis[1], 0, 0,
     0, 0, 0, 0
   );
 }
@@ -421,10 +418,10 @@ void sendESPNOW() {
   strncpy(packet.name, deviceName, sizeof(packet.name) - 1);
   packet.name[sizeof(packet.name) - 1] = '\0';
   packet.buttons = buttons;
-  // Copy 3 axes, rest are 0
+  // Copy 2 axes, rest are 0
   packet.axis[0] = axis[0];
   packet.axis[1] = axis[1];
-  packet.axis[2] = axis[2];
+  packet.axis[2] = 0;
   packet.axis[3] = 0;
   packet.axis[4] = 0;
   packet.axis[5] = 0;
@@ -519,8 +516,8 @@ void cmdDeadzone(const String& cmd) {
     return;
   }
 
-  if (axisNum < 0 || axisNum >= 3) {
-    Serial.println("INVALID ANALOG INDEX (A0-A2)");
+  if (axisNum < 0 || axisNum >= 2) {
+    Serial.println("INVALID ANALOG INDEX (A0-A1)");
     return;
   }
 
@@ -541,8 +538,8 @@ void cmdInvert(const String& cmd) {
     return;
   }
 
-  if (axisNum < 0 || axisNum >= 3) {
-    Serial.println("INVALID ANALOG INDEX (A0-A2)");
+  if (axisNum < 0 || axisNum >= 2) {
+    Serial.println("INVALID ANALOG INDEX (A0-A1)");
     return;
   }
 
@@ -561,8 +558,8 @@ void cmdScale(const String& cmd) {
     return;
   }
 
-  if (axisNum < 0 || axisNum >= 3) {
-    Serial.println("INVALID ANALOG INDEX (A0-A2)");
+  if (axisNum < 0 || axisNum >= 2) {
+    Serial.println("INVALID ANALOG INDEX (A0-A1)");
     return;
   }
 
@@ -588,9 +585,8 @@ void processSerial() {
     case CMD_LIST:
       Serial.println("D0 D1 D2 D3 D4 D5 GPIO25(TRIGGER_R) GPIO26(TRIGGER_L) MPU6050");
       Serial.println("AXIS MAPPING:");
-      Serial.println("  Axis 0 (X): MPU6050 -80 to +80 degrees");
-      Serial.println("  Axis 1 (Y): Unused");
-      Serial.println("  Axis 2 (Z): GPIO25=+32767, GPIO26=-32767, Released=0");
+      Serial.println("  Axis 0: MPU6050 -80 to +80 degrees (left stick X)");
+      Serial.println("  Axis 1: GPIO25=+32767, GPIO26=-32767, Released=0 (Z axis)");
       break;
 
     case CMD_RESET:
